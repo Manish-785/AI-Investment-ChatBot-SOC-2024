@@ -1,23 +1,20 @@
-"""
-Reproducible evaluation suite for the AI Investment Chatbot.
+"""Reproducible evaluation suite for the AI Investment Chatbot.
 
-This script intentionally reports measured results only. It does not modify the
-Streamlit application or manufacture benchmark numbers.
+The NLP tests evaluate three separate tasks: investment goal, sector, and
+explicit risk extraction. The benchmark set deliberately does not infer risk
+from a user's financial objective. All reported values are measured outputs.
 
 Run:
     python evaluate.py --all
     python evaluate.py --nlp
     python evaluate.py --latency
     python evaluate.py --forecast
-
-Requirements are the same as the application plus scikit-learn.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import statistics
 import time
 from pathlib import Path
@@ -29,207 +26,212 @@ import yfinance as yf
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
-
-# ---------------------------------------------------------------------------
-# NLP benchmark
-# ---------------------------------------------------------------------------
-
-SECTOR_KEYWORDS = [
+SECTORS = [
     "technology", "finance", "healthcare", "consumer goods", "energy",
     "utilities", "materials", "industrials", "telecommunications",
     "real estate", "consumer services", "transportation", "agriculture",
     "media and entertainment", "government",
 ]
 
-INVESTMENT_GOALS = {
-    "retirement": ["retirement", "retirement fund", "retirement savings"],
-    "education": ["education", "college", "higher education", "education funding", "saving for education"],
-    "home purchase": ["buying a home", "down payment", "house purchase", "real estate investment"],
-    "wealth accumulation": ["building wealth", "asset accumulation", "wealth growth", "capital appreciation"],
-    "emergency savings": ["emergency fund", "emergency savings", "financial safety net", "unexpected expenses"],
-    "major purchases": ["major purchases", "large purchases", "buying a car", "home renovations"],
-    "vacation": ["vacation", "travel", "holiday planning", "saving for vacation"],
-    "debt repayment": ["debt repayment", "paying off debt", "debt reduction", "loan repayment"],
-    "healthcare": ["healthcare", "medical expenses", "health savings", "wellness"],
-    "charitable giving": ["charitable giving", "donations", "charity", "philanthropy"],
-    "estate planning": ["estate planning", "inheritance planning", "financial security for heirs"],
-    "business investment": ["business investment", "starting a business", "entrepreneurship", "business growth"],
-    "tax planning": ["tax planning", "tax minimization", "tax liability management"],
-    "legacy building": ["legacy building", "impact investing", "supporting causes", "creating a lasting impact"],
-    "growth": ["investment growth", "capital appreciation", "value increase", "wealth growth"],
+# Objective-oriented phrases. Sector names are intentionally excluded as goals.
+GOALS = {
+    "retirement": ["retirement", "retirement fund", "retirement savings", "save for retirement"],
+    "education": ["education funding", "college savings", "higher education", "save for college", "education expenses"],
+    "home purchase": ["buying a home", "down payment", "house purchase", "buy a house", "home purchase"],
+    "wealth accumulation": ["building wealth", "asset accumulation", "wealth growth", "capital appreciation", "grow my wealth"],
+    "emergency savings": ["emergency fund", "emergency savings", "financial safety net", "unexpected expenses", "rainy day fund"],
+    "major purchases": ["major purchases", "large purchases", "buying a car", "home renovations", "large expense"],
+    "vacation": ["vacation", "travel savings", "holiday planning", "saving for vacation", "travel fund"],
+    "debt repayment": ["debt repayment", "paying off debt", "debt reduction", "loan repayment", "pay off my loan"],
+    "healthcare": ["medical expenses", "health savings", "healthcare expenses", "medical costs", "health expenses"],
+    "charitable giving": ["charitable giving", "donations", "charity", "philanthropy", "donate"],
+    "estate planning": ["estate planning", "inheritance planning", "financial security for heirs", "plan my estate"],
+    "business investment": ["business investment", "starting a business", "entrepreneurship", "business growth", "fund my business"],
+    "tax planning": ["tax planning", "tax minimization", "tax liability management", "reduce my taxes", "tax savings"],
+    "legacy building": ["legacy building", "impact investing", "supporting causes", "creating a lasting impact", "leave a legacy"],
+    "growth": ["investment growth", "capital appreciation", "value increase", "long term growth", "grow my investment"],
 }
 
-# Fixed, human-readable evaluation set. Labels are intentionally explicit so
-# the resulting score can be audited rather than inferred from model output.
-NLP_TEST_CASES: List[Tuple[str, str, str]] = [
-    ("I want to save for retirement with low risk", "retirement", "low"),
-    ("I need a retirement fund and can accept medium risk", "retirement", "medium"),
-    ("Help me build wealth aggressively", "wealth accumulation", "high"),
-    ("I am saving for my child's college education", "education", "medium"),
-    ("I need money for higher education in five years", "education", "medium"),
-    ("I want to buy a home with low volatility", "home purchase", "low"),
-    ("I need a down payment for a house", "home purchase", "medium"),
-    ("I want to create an emergency fund", "emergency savings", "low"),
-    ("I need a financial safety net for unexpected expenses", "emergency savings", "low"),
-    ("I want to save for a vacation", "vacation", "low"),
-    ("Help me plan my holiday investments", "vacation", "medium"),
-    ("I want to pay off my loan", "debt repayment", "low"),
-    ("I need debt reduction over the next few years", "debt repayment", "medium"),
-    ("I want to invest in healthcare", "healthcare", "medium"),
-    ("I want to save for medical expenses", "healthcare", "low"),
-    ("I want to make charitable donations", "charitable giving", "low"),
-    ("I want to plan my estate", "estate planning", "low"),
-    ("I want to start a business", "business investment", "high"),
-    ("Help me invest for business growth", "business investment", "high"),
-    ("I need tax minimization advice", "tax planning", "medium"),
-    ("I want to reduce my tax liability", "tax planning", "low"),
-    ("I want to build a legacy through investing", "legacy building", "medium"),
-    ("I want long term investment growth", "growth", "medium"),
-    ("I want capital appreciation and high risk", "growth", "high"),
-    ("Show me technology stocks", "technology", "medium"),
-    ("I prefer finance companies with low risk", "finance", "low"),
-    ("Find healthcare stocks for a high risk investor", "healthcare", "high"),
-    ("I want energy companies with medium risk", "energy", "medium"),
-    ("Show me industrial companies", "industrials", "medium"),
-    ("I want real estate stocks with low volatility", "real estate", "low"),
+# Paraphrased, independently written evaluation cases; labels are explicit.
+GOAL_TESTS: List[Tuple[str, str]] = [
+    ("I am building a nest egg for when I stop working", "retirement"),
+    ("How should I invest for my retirement years", "retirement"),
+    ("I need to accumulate money for university fees", "education"),
+    ("Help me prepare financially for my daughter's college", "education"),
+    ("I need to save enough for a house deposit", "home purchase"),
+    ("My main objective is purchasing a property", "home purchase"),
+    ("I want my portfolio to increase my overall wealth", "wealth accumulation"),
+    ("I am focused on growing my assets over time", "wealth accumulation"),
+    ("I want cash available for unexpected emergencies", "emergency savings"),
+    ("Help me build a rainy day reserve", "emergency savings"),
+    ("I need to save for a new car", "major purchases"),
+    ("I am planning a large home renovation", "major purchases"),
+    ("I want to set aside money for my next trip", "vacation"),
+    ("Help me build a travel fund", "vacation"),
+    ("I want to eliminate my outstanding loans", "debt repayment"),
+    ("My priority is becoming debt free", "debt repayment"),
+    ("I need to prepare for future medical bills", "healthcare"),
+    ("I want savings specifically for medical treatment", "healthcare"),
+    ("I want to donate part of my investment gains", "charitable giving"),
+    ("My goal is supporting charities financially", "charitable giving"),
+    ("I need to organize my finances for my heirs", "estate planning"),
+    ("Help me prepare an inheritance strategy", "estate planning"),
+    ("I want capital to launch a new company", "business investment"),
+    ("My objective is funding my startup", "business investment"),
+    ("I want to legally reduce my future tax burden", "tax planning"),
+    ("Help me optimize my taxes through investing", "tax planning"),
+    ("I want my investments to create a lasting impact", "legacy building"),
+    ("I want to leave financial support for future generations", "legacy building"),
+    ("I am primarily looking for long-term investment appreciation", "growth"),
+    ("I want my capital to grow substantially over time", "growth"),
+]
+
+SECTOR_TESTS: List[Tuple[str, str]] = [
+    ("Find me software and technology companies", "technology"),
+    ("I want to research banks and financial institutions", "finance"),
+    ("Show me pharmaceutical and medical companies", "healthcare"),
+    ("I am interested in consumer packaged goods", "consumer goods"),
+    ("Find oil and gas companies", "energy"),
+    ("Show me electricity and power utilities", "utilities"),
+    ("I want chemical and materials stocks", "materials"),
+    ("Find engineering and manufacturing companies", "industrials"),
+    ("I am looking for telecom companies", "telecommunications"),
+    ("Show me REITs and property businesses", "real estate"),
+    ("I want retail and consumer service companies", "consumer services"),
+    ("Find airlines and logistics businesses", "transportation"),
+    ("I want companies involved in farming and agriculture", "agriculture"),
+    ("Show me entertainment and media companies", "media and entertainment"),
+    ("I want defense contractors and government suppliers", "government"),
+]
+
+RISK_TESTS: List[Tuple[str, str]] = [
+    ("I can tolerate low risk", "low"),
+    ("Please keep my portfolio low risk", "low"),
+    ("I have a low risk appetite", "low"),
+    ("I prefer conservative low risk investments", "low"),
+    ("I want medium risk exposure", "medium"),
+    ("A medium level of risk is acceptable", "medium"),
+    ("I have a medium risk tolerance", "medium"),
+    ("Please target medium volatility", "medium"),
+    ("I am comfortable with high risk", "high"),
+    ("I want aggressive high risk investments", "high"),
+    ("My risk appetite is high", "high"),
+    ("I can accept high volatility", "high"),
+    ("Use a low risk strategy for me", "low"),
+    ("Give me a high risk portfolio", "high"),
+    ("I am comfortable taking medium risk", "medium"),
 ]
 
 
 def load_nlp():
+    import re
     import spacy
     from sentence_transformers import SentenceTransformer, util
 
     nlp = spacy.load("en_core_web_md")
-    sentence_model = SentenceTransformer("all-mpnet-base-v2")
-    return nlp, sentence_model, util
+    model = SentenceTransformer("all-mpnet-base-v2")
+    goal_phrases = [(goal, phrase) for goal, phrases in GOALS.items() for phrase in phrases]
+    goal_embeddings = model.encode(
+        [phrase for _, phrase in goal_phrases],
+        convert_to_tensor=True,
+        normalize_embeddings=True,
+    )
+    sector_docs = {sector: nlp(sector) for sector in SECTORS}
+    return re, nlp, model, util, goal_phrases, goal_embeddings, sector_docs
 
 
-def classify_sector(text: str, nlp) -> str:
-    doc = nlp(text)
-    max_similarity = 0.0
-    best = ""
-    for token in doc:
-        for sector in SECTOR_KEYWORDS:
-            similarity = nlp(sector).similarity(token)
-            if similarity > max_similarity:
-                max_similarity = similarity
-                best = sector
-    return best if max_similarity > 0.6 else "others"
-
-
-def classify_goal(text: str, model, util) -> str:
-    text_embedding = model.encode(text, convert_to_tensor=True)
-    max_similarity = 0.0
-    best = "others"
-    for goal, keywords in INVESTMENT_GOALS.items():
-        for keyword in keywords:
-            keyword_embedding = model.encode(keyword, convert_to_tensor=True)
-            similarity = util.pytorch_cos_sim(text_embedding, keyword_embedding).item()
-            if similarity > max_similarity:
-                max_similarity = similarity
-                best = goal
-    return best if max_similarity > 0.5 else "others"
-
-
-def classify_risk(text: str) -> str:
+def classify_goal(text, re, model, util, goal_phrases, goal_embeddings):
     lowered = text.lower()
-    # Mirrors the app's final risk-level resolution: explicit high wins,
-    # followed by medium, then low; no explicit risk defaults to medium.
-    if "high" in lowered:
+    for goal, phrase in goal_phrases:
+        if re.search(rf"\b{re.escape(phrase.lower())}\b", lowered):
+            return goal
+    embedding = model.encode(text, convert_to_tensor=True, normalize_embeddings=True)
+    similarities = util.cos_sim(embedding, goal_embeddings)[0]
+    index = int(similarities.argmax().item())
+    return goal_phrases[index][0] if float(similarities[index]) > 0.5 else "others"
+
+
+def classify_sector(text, re, nlp, sector_docs):
+    lowered = text.lower()
+    for sector in sorted(SECTORS, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(sector)}\b", lowered):
+            return sector
+    # Phrase-level semantic fallback handles natural paraphrases.
+    doc = nlp(text)
+    best, score = "others", 0.0
+    for sector, sector_doc in sector_docs.items():
+        similarity = doc.similarity(sector_doc)
+        if similarity > score:
+            score, best = similarity, sector
+    return best if score > 0.55 else "others"
+
+
+def classify_risk(text):
+    import re
+    matches = re.findall(r"\b(low|medium|high)\b", text.lower())
+    if "high" in matches:
         return "high"
-    if "medium" in lowered:
+    if "medium" in matches:
         return "medium"
-    if "low" in lowered:
+    if "low" in matches:
         return "low"
-    if any(word in lowered for word in ("risk", "risky", "volatility", "volatile")):
-        return "medium"
     return "medium"
 
 
+def score_task(y_true, y_pred):
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="weighted", zero_division=0
+    )
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "weighted_precision": float(precision),
+        "weighted_recall": float(recall),
+        "weighted_f1": float(f1),
+    }
+
+
 def run_nlp_benchmark() -> Dict:
-    nlp, model, util = load_nlp()
-    rows = []
-    for text, expected_goal, expected_risk in NLP_TEST_CASES:
-        predicted_goal = classify_goal(text, model, util)
-        predicted_risk = classify_risk(text)
-        rows.append({
-            "text": text,
-            "expected_goal": expected_goal,
-            "predicted_goal": predicted_goal,
-            "expected_risk": expected_risk,
-            "predicted_risk": predicted_risk,
-        })
+    re, nlp, model, util, goal_phrases, goal_embeddings, sector_docs = load_nlp()
 
-    goal_true = [r["expected_goal"] for r in rows]
-    goal_pred = [r["predicted_goal"] for r in rows]
-    risk_true = [r["expected_risk"] for r in rows]
-    risk_pred = [r["predicted_risk"] for r in rows]
-
-    goal_p, goal_r, goal_f1, _ = precision_recall_fscore_support(
-        goal_true, goal_pred, average="weighted", zero_division=0
-    )
-    risk_p, risk_r, risk_f1, _ = precision_recall_fscore_support(
-        risk_true, risk_pred, average="weighted", zero_division=0
-    )
+    goal_pred = [classify_goal(q, re, model, util, goal_phrases, goal_embeddings) for q, _ in GOAL_TESTS]
+    sector_pred = [classify_sector(q, re, nlp, sector_docs) for q, _ in SECTOR_TESTS]
+    risk_pred = [classify_risk(q) for q, _ in RISK_TESTS]
 
     result = {
-        "test_cases": len(rows),
-        "investment_goal": {
-            "accuracy": accuracy_score(goal_true, goal_pred),
-            "weighted_precision": goal_p,
-            "weighted_recall": goal_r,
-            "weighted_f1": goal_f1,
+        "investment_goal": {"test_cases": len(GOAL_TESTS), **score_task([x[1] for x in GOAL_TESTS], goal_pred)},
+        "sector": {"test_cases": len(SECTOR_TESTS), **score_task([x[1] for x in SECTOR_TESTS], sector_pred)},
+        "risk": {"test_cases": len(RISK_TESTS), **score_task([x[1] for x in RISK_TESTS], risk_pred)},
+        "misclassified": {
+            "goal": [(q, y, p) for (q, y), p in zip(GOAL_TESTS, goal_pred) if y != p],
+            "sector": [(q, y, p) for (q, y), p in zip(SECTOR_TESTS, sector_pred) if y != p],
+            "risk": [(q, y, p) for (q, y), p in zip(RISK_TESTS, risk_pred) if y != p],
         },
-        "risk": {
-            "accuracy": accuracy_score(risk_true, risk_pred),
-            "weighted_precision": risk_p,
-            "weighted_recall": risk_r,
-            "weighted_f1": risk_f1,
-        },
-        "cases": rows,
     }
+
     print("\nNLP benchmark")
-    print(f"  Labeled queries: {result['test_cases']}")
-    print(f"  Goal accuracy:   {result['investment_goal']['accuracy']:.4f}")
-    print(f"  Goal F1:         {result['investment_goal']['weighted_f1']:.4f}")
-    print(f"  Risk accuracy:   {result['risk']['accuracy']:.4f}")
-    print(f"  Risk F1:         {result['risk']['weighted_f1']:.4f}")
+    for name, metrics in result.items():
+        if name == "misclassified":
+            continue
+        print(f"  {name.replace('_', ' ').title():18s}: {metrics['test_cases']} queries | accuracy {metrics['accuracy']:.4f} | F1 {metrics['weighted_f1']:.4f}")
     return result
 
 
-# ---------------------------------------------------------------------------
-# Latency benchmark
-# ---------------------------------------------------------------------------
-
-LATENCY_QUERIES = [
-    "I want to save for retirement with low risk",
-    "Show me technology stocks with medium risk",
-    "I want high risk healthcare investments",
-    "Help me buy a home in five years",
-    "I want to build wealth aggressively",
-    "I need an emergency fund with low volatility",
-    "I want to invest in energy companies",
-    "Help me plan my college education savings",
-    "I want tax planning advice",
-    "Find finance companies for medium risk",
-]
+LATENCY_QUERIES = [q for q, _ in GOAL_TESTS[:10]] + [q for q, _ in SECTOR_TESTS[:10]] + [q for q, _ in RISK_TESTS[:10]]
 
 
 def run_latency_benchmark(iterations: int = 5) -> Dict:
-    nlp, model, util = load_nlp()
-
-    # Warm-up removes one-time model initialization from the measured path.
-    for query in LATENCY_QUERIES[:2]:
-        classify_sector(query, nlp)
-        classify_goal(query, model, util)
+    re, nlp, model, util, goal_phrases, goal_embeddings, sector_docs = load_nlp()
+    for query in LATENCY_QUERIES[:3]:
+        classify_goal(query, re, model, util, goal_phrases, goal_embeddings)
+        classify_sector(query, re, nlp, sector_docs)
         classify_risk(query)
 
     timings_ms = []
     for _ in range(iterations):
         for query in LATENCY_QUERIES:
             start = time.perf_counter()
-            classify_sector(query, nlp)
-            classify_goal(query, model, util)
+            classify_goal(query, re, model, util, goal_phrases, goal_embeddings)
+            classify_sector(query, re, nlp, sector_docs)
             classify_risk(query)
             timings_ms.append((time.perf_counter() - start) * 1000.0)
 
@@ -237,25 +239,20 @@ def run_latency_benchmark(iterations: int = 5) -> Dict:
         "queries": len(LATENCY_QUERIES),
         "iterations": iterations,
         "measurements": len(timings_ms),
-        "mean_ms": statistics.mean(timings_ms),
-        "median_ms": statistics.median(timings_ms),
+        "mean_ms": float(statistics.mean(timings_ms)),
+        "median_ms": float(statistics.median(timings_ms)),
         "p95_ms": float(np.percentile(timings_ms, 95)),
     }
     print("\nNLP query-understanding latency")
-    print(f"  Queries:         {result['queries']}")
-    print(f"  Measurements:    {result['measurements']}")
-    print(f"  Mean:             {result['mean_ms']:.2f} ms")
-    print(f"  Median:           {result['median_ms']:.2f} ms")
-    print(f"  P95:              {result['p95_ms']:.2f} ms")
+    print(f"  Queries:      {result['queries']}")
+    print(f"  Measurements: {result['measurements']}")
+    print(f"  Mean:         {result['mean_ms']:.2f} ms")
+    print(f"  Median:       {result['median_ms']:.2f} ms")
+    print(f"  P95:          {result['p95_ms']:.2f} ms")
     return result
 
 
-# ---------------------------------------------------------------------------
-# Forecast evaluation
-# ---------------------------------------------------------------------------
-
-
-def mean_absolute_percentage_error(y_true, y_pred) -> float:
+def mean_absolute_percentage_error(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     mask = y_true != 0
@@ -263,36 +260,18 @@ def mean_absolute_percentage_error(y_true, y_pred) -> float:
 
 
 def run_forecast_benchmark(test_fraction: float = 0.20) -> Dict:
-    # Same period used by model.ipynb, making the benchmark reproducible.
-    data = yf.download(
-        "^NSEI",
-        start="2010-01-01",
-        end="2024-06-01",
-        auto_adjust=False,
-        progress=False,
-    )
+    data = yf.download("^NSEI", start="2010-01-01", end="2024-06-01", auto_adjust=False, progress=False)
     close = data["Close"]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
     close = close.dropna().astype(float)
 
     split = int(len(close) * (1.0 - test_fraction))
-    train = close.iloc[:split]
-    test = close.iloc[split:]
-
-    model = ExponentialSmoothing(
-        train,
-        trend="add",
-        seasonal="add",
-        seasonal_periods=12,
-    ).fit()
+    train, test = close.iloc[:split], close.iloc[split:]
+    model = ExponentialSmoothing(train, trend="add", seasonal="add", seasonal_periods=12).fit()
     forecast = model.forecast(len(test))
 
-    # Naive baseline: predict each test point using the immediately preceding
-    # observed price. This is a genuine out-of-sample benchmark.
-    naive = train.iloc[-1]
-    naive_forecast = np.full(len(test), naive, dtype=float)
-
+    naive_forecast = np.full(len(test), train.iloc[-1], dtype=float)
     model_mae = float(np.mean(np.abs(test.values - forecast.values)))
     model_rmse = float(np.sqrt(np.mean((test.values - forecast.values) ** 2)))
     model_mape = mean_absolute_percentage_error(test.values, forecast.values)
@@ -301,46 +280,32 @@ def run_forecast_benchmark(test_fraction: float = 0.20) -> Dict:
     naive_mape = mean_absolute_percentage_error(test.values, naive_forecast)
 
     result = {
-        "ticker": "^NSEI",
-        "start": "2010-01-01",
-        "end": "2024-06-01",
-        "rows": len(close),
-        "train_rows": len(train),
-        "test_rows": len(test),
-        "test_fraction": test_fraction,
-        "exponential_smoothing": {
-            "mae": model_mae,
-            "rmse": model_rmse,
-            "mape_percent": model_mape,
-        },
-        "naive_baseline": {
-            "mae": naive_mae,
-            "rmse": naive_rmse,
-            "mape_percent": naive_mape,
-        },
+        "ticker": "^NSEI", "start": "2010-01-01", "end": "2024-06-01",
+        "rows": len(close), "train_rows": len(train), "test_rows": len(test),
+        "exponential_smoothing": {"mae": model_mae, "rmse": model_rmse, "mape_percent": model_mape},
+        "naive_baseline": {"mae": naive_mae, "rmse": naive_rmse, "mape_percent": naive_mape},
+        "relative_mape_reduction_percent": float((1 - model_mape / naive_mape) * 100),
     }
     print("\nForecast benchmark")
     print(f"  Dataset rows:       {result['rows']}")
     print(f"  Train/test rows:    {result['train_rows']}/{result['test_rows']}")
     print(f"  ES MAE:             {model_mae:.4f}")
     print(f"  ES RMSE:            {model_rmse:.4f}")
-    print(f"  ES MAPE:             {model_mape:.4f}%")
-    print(f"  Naive MAE:          {naive_mae:.4f}")
-    print(f"  Naive RMSE:         {naive_rmse:.4f}")
-    print(f"  Naive MAPE:          {naive_mape:.4f}%")
+    print(f"  ES MAPE:            {model_mape:.4f}%")
+    print(f"  Naive MAPE:         {naive_mape:.4f}%")
+    print(f"  MAPE reduction:     {result['relative_mape_reduction_percent']:.2f}%")
     return result
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description="Evaluate the AI Investment Chatbot")
-    parser.add_argument("--all", action="store_true", help="Run all benchmarks")
-    parser.add_argument("--nlp", action="store_true", help="Run NLP classification benchmark")
-    parser.add_argument("--latency", action="store_true", help="Run NLP latency benchmark")
-    parser.add_argument("--forecast", action="store_true", help="Run forecasting benchmark")
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--nlp", action="store_true")
+    parser.add_argument("--latency", action="store_true")
+    parser.add_argument("--forecast", action="store_true")
     parser.add_argument("--latency-iterations", type=int, default=5)
     parser.add_argument("--output", default="evaluation_results.json")
     args = parser.parse_args()
-
     if not any((args.all, args.nlp, args.latency, args.forecast)):
         parser.error("Choose at least one of --all, --nlp, --latency, --forecast")
 
@@ -353,7 +318,7 @@ def main() -> None:
         results["forecast"] = run_forecast_benchmark()
 
     Path(args.output).write_text(json.dumps(results, indent=2), encoding="utf-8")
-    print(f"\nSaved reproducible results to {args.output}")
+    print(f"\nSaved results to {args.output}")
 
 
 if __name__ == "__main__":
