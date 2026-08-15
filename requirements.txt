@@ -1,0 +1,13 @@
+streamlit
+numpy
+pandas
+matplotlib
+yfinance
+statsmodels
+scikit-learn
+spacy
+sentence-transformers
+transformers
+torch
+sentencepiece
+nltk
